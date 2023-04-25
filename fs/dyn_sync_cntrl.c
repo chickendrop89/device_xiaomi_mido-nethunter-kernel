@@ -11,11 +11,10 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/mutex.h>
-#include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/writeback.h>
 #include <linux/dyn_sync_cntrl.h>
-#include <linux/state_notifier.h>
+#include <linux/fb.h>
 
 // fsync_mutex protects dyn_fsync_active during suspend / late resume transitions
 static DEFINE_MUTEX(fsync_mutex);
@@ -26,7 +25,7 @@ static DEFINE_MUTEX(fsync_mutex);
 bool suspend_active = false;
 bool dyn_fsync_active = DYN_FSYNC_ACTIVE_DEFAULT;
 
-static struct notifier_block notifier;
+static struct notifier_block fb_notifier;
 
 extern void sync_filesystems(int wait);
 
@@ -118,32 +117,39 @@ static int dyn_fsync_notify_sys(struct notifier_block *this, unsigned long code,
 	return NOTIFY_DONE;
 }
 
-static int state_notifier_callback(struct notifier_block *this,
-								unsigned long event, void *data)
+static int fb_notifier_callback(struct notifier_block *self,
+				             unsigned long event, void *data)
 {
-	switch (event) 
-	{
-		case STATE_NOTIFIER_ACTIVE:
-			mutex_lock(&fsync_mutex);
-			
-			suspend_active = false;
+	struct fb_event *evdata = data;
+	int *blank;
 
-			if (dyn_fsync_active) 
-			{
-				dyn_fsync_force_flush();
-			}
+	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
+		blank = evdata->data;
+		switch (*blank) {
+			case FB_BLANK_UNBLANK:
+		        mutex_lock(&fsync_mutex);
+			    suspend_active = false;
+
+			    if (dyn_fsync_active) 
+		 	    {
+				    dyn_fsync_force_flush();
+			    }
 			
-			mutex_unlock(&fsync_mutex);
+			    mutex_unlock(&fsync_mutex);
 			break;
-			
-		case STATE_NOTIFIER_SUSPEND:
-			mutex_lock(&fsync_mutex);
-			suspend_active = true;
-			mutex_unlock(&fsync_mutex);
-			break;
-			
-		default:
-			break;
+
+			case FB_BLANK_POWERDOWN:
+			case FB_BLANK_HSYNC_SUSPEND:
+			case FB_BLANK_VSYNC_SUSPEND:
+			case FB_BLANK_NORMAL:
+				mutex_lock(&fsync_mutex);
+			    suspend_active = true;
+			    mutex_unlock(&fsync_mutex);
+            break;
+
+            default:
+                break;
+		}
 	}
 
 	return 0;
@@ -217,8 +223,8 @@ static int dyn_fsync_init(void)
 		kobject_put(dyn_fsync_kobj);
 	}
 
-	notifier.notifier_call = state_notifier_callback;
-	if (state_register_client(&notifier) != 0) 
+	fb_notifier.notifier_call = fb_notifier_callback;
+	if (fb_register_client(&fb_notifier) != 0) 
 	{
 		pr_err("%s: Failed to register lcd callback\n", __func__);
 
@@ -249,7 +255,7 @@ static void dyn_fsync_exit(void)
 	if (dyn_fsync_kobj != NULL)
 		kobject_put(dyn_fsync_kobj);
 	
-	state_unregister_client(&notifier);
+	fb_unregister_client(&fb_notifier);
 		
 	pr_info("%s dynamic fsync unregistration complete\n", __FUNCTION__);
 }
